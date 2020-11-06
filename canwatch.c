@@ -163,7 +163,7 @@
 #define SILENT_ON  2  /* silent mode (completely silent) */
 
 #define FORMAT_CANDUMP  0 /* Use the same log format as candump.c */
-#define FORMAT_SAVVY    1 /* Use the SavvyCAN log format */
+#define FORMAT_SAVVY    1 /* Use the SavvyCAN CSV log format */
 #define FORMAT_BINARY   2 /* Store binary data in the log */
 
 
@@ -297,6 +297,43 @@ int idx2dindex(int ifidx, int socket)
 
     return i;
 }
+
+int openLog()
+    {
+        time_t currtime;
+        struct tm now;
+        char fname[83]; /* suggested by -Wformat-overflow= */
+        int retCode = 0;
+
+        if (time(&currtime) == (time_t)-1)
+        {
+            perror("time");
+            return 1;
+        }
+
+        localtime_r(&currtime, &now);
+
+        sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
+                now.tm_year + 1900,
+                now.tm_mon + 1,
+                now.tm_mday,
+                now.tm_hour,
+                now.tm_min,
+                now.tm_sec);
+
+        if (silent != SILENT_ON)
+            fprintf(stderr, "Warning: Console output active while logging!\n");
+
+        fprintf(stderr, "Enabling Logfile '%s'\n", fname);
+
+        logfile = fopen(fname, "w");
+        if (!logfile)
+        {
+            perror("logfile");
+            retCode = 1;
+        }
+        return retCode;
+    }
 
 int main(int argc, char **argv)
 {
@@ -704,35 +741,11 @@ int main(int argc, char **argv)
         }
     }
 
-    if (log)
+    if (log)  // Changed to function call for 
     {
-        time_t currtime;
-        struct tm now;
-        char fname[83]; /* suggested by -Wformat-overflow= */
-
-        if (time(&currtime) == (time_t)-1)
-        {
-            perror("time");
-            return 1;
-        }
-
-        localtime_r(&currtime, &now);
-
-        sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
-                now.tm_year + 1900,
-                now.tm_mon + 1,
-                now.tm_mday,
-                now.tm_hour,
-                now.tm_min,
-                now.tm_sec);
-
-        if (silent != SILENT_ON)
-            fprintf(stderr, "Warning: Console output active while logging!\n");
-
-        fprintf(stderr, "Enabling Logfile '%s'\n", fname);
-
-        logfile = fopen(fname, "w");
-        if (!logfile)
+        int logOpened;
+        logOpened = openLog();
+        if (0 != logOpened)
         {
             perror("logfile");
             return 1;
