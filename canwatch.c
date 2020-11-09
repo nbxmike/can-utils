@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+
 /*
  * canwatch.c
  *
@@ -127,6 +128,9 @@
 #include <libgen.h>
 #include <time.h>
 #include <errno.h>
+#include <time.h>
+#include <fcntl.h>
+#include <termios.h>
 
 #include <sys/time.h>
 #include <sys/types.h>
@@ -147,9 +151,9 @@
 #endif
 
 /* from #include <linux/net_tstamp.h> - since Linux 2.6.30 */
-#define SOF_TIMESTAMPING_SOFTWARE (1<<4)
-#define SOF_TIMESTAMPING_RX_SOFTWARE (1<<3)
-#define SOF_TIMESTAMPING_RAW_HARDWARE (1<<6)
+#define SOF_TIMESTAMPING_SOFTWARE (1 << 4)
+#define SOF_TIMESTAMPING_RX_SOFTWARE (1 << 3)
+#define SOF_TIMESTAMPING_RAW_HARDWARE (1 << 6)
 
 #define MAXSOCK 16    /* max. number of CAN interfaces given on the cmdline */
 #define MAXIFNAMES 30 /* size of receive name index to omit ioctls */
@@ -160,30 +164,31 @@
 #define SILENT_INI 42 /* detect user setting on commandline */
 #define SILENT_OFF 0  /* no silent mode */
 #define SILENT_ANI 1  /* silent mode with animation */
-#define SILENT_ON  2  /* silent mode (completely silent) */
+#define SILENT_ON 2   /* silent mode (completely silent) */
 
-#define FORMAT_CANDUMP  0 /* Use the same log format as candump.c */
-#define FORMAT_SAVVY    1 /* Use the SavvyCAN CSV log format */
-#define FORMAT_BINARY   2 /* Store binary data in the log */
+#define FORMAT_CANDUMP 0 /* Use the same log format as candump.c */
+#define FORMAT_SAVVY 1   /* Use the SavvyCAN CSV log format */
+#define FORMAT_BINARY 2  /* Store binary data in the log */
 
+#define ERROR_LENGTH (64) /* Sizeof error message strings */
 
-#define BOLD    ATTBOLD
-#define RED     ATTBOLD FGRED
-#define GREEN   ATTBOLD FGGREEN
-#define YELLOW  ATTBOLD FGYELLOW
-#define BLUE    ATTBOLD FGBLUE
+#define BOLD ATTBOLD
+#define RED ATTBOLD FGRED
+#define GREEN ATTBOLD FGGREEN
+#define YELLOW ATTBOLD FGYELLOW
+#define BLUE ATTBOLD FGBLUE
 #define MAGENTA ATTBOLD FGMAGENTA
-#define CYAN    ATTBOLD FGCYAN
+#define CYAN ATTBOLD FGCYAN
 
-const char col_on [MAXCOL][19] = {BLUE, RED, GREEN, BOLD, MAGENTA, CYAN};
-const char col_off [] = ATTRESET;
+const char col_on[MAXCOL][19] = {BLUE, RED, GREEN, BOLD, MAGENTA, CYAN};
+const char col_off[] = ATTRESET;
 
 static char *cmdlinename[MAXSOCK];
 static __u32 dropcnt[MAXSOCK];
 static __u32 last_dropcnt[MAXSOCK];
-static char devname[MAXIFNAMES][IFNAMSIZ+1];
-static int  dindex[MAXIFNAMES];
-static int  max_devname_len; /* to prevent frazzled device name output */
+static char devname[MAXIFNAMES][IFNAMSIZ + 1];
+static int dindex[MAXIFNAMES];
+static int max_devname_len; /* to prevent frazzled device name output */
 const int canfd_on = 1;
 
 #define MAXANI 4
@@ -193,6 +198,55 @@ const char extra_m_info[4][4] = {"- -", "B -", "- E", "B E"};
 extern int optind, opterr, optopt;
 
 static volatile int running = 1;
+FILE *logfile = NULL;
+unsigned char silent = SILENT_INI;
+
+// Changes to support UART logging
+#define MAX_DEVICE_NAME (83)
+static char uart_name[MAX_DEVICE_NAME] = "\0";
+static char uart_buffer[255]; /* basic input buffer */
+static speed_t uart_speed = B115200;
+static int uart_fd = 0;
+static struct timespec uart_tv;
+
+int open_uart(char *device_name, speed_t baud)
+{
+    int file_descriptor;
+    char outstring[ERROR_LENGTH];
+    struct termios uart_options;
+
+    file_descriptor = open(device_name, O_RDWR | O_NOCTTY | O_NDELAY);
+    if (file_descriptor == -1)
+    {
+        snprintf(outstring, ERROR_LENGTH, "TTY open failed on '%s'", device_name);
+        perror(outstring);
+    }
+    else
+    {
+        fcntl(file_descriptor, F_SETFL, FNDELAY);  // Non-blocking read
+        tcgetattr(file_descriptor, &uart_options); // Set line options
+        // Set the BAUD rate
+        cfsetispeed(&uart_options, baud);
+        cfsetospeed(&uart_options, baud);
+        // N81 symbols
+        uart_options.c_cflag &= ~PARENB;
+        uart_options.c_cflag &= ~CSTOPB;
+        uart_options.c_cflag &= ~CSIZE;
+        uart_options.c_cflag |= CS8;
+        // Check then strip parity bits
+        uart_options.c_iflag |= (INPCK | ISTRIP);
+        // No hardware flow control
+        uart_options.c_cflag &= ~CRTSCTS;
+        // Line oriented input, no echoing
+        uart_options.c_lflag |= ICANON;
+        uart_options.c_lflag &= ~(ECHO | ECHOE | ISIG);
+        uart_options.c_cflag |= (CLOCAL | CREAD);
+        // Output processing - no thanks
+        uart_options.c_oflag &= ~OPOST;
+        tcsetattr(file_descriptor, TCSANOW, &uart_options);
+    }
+    return (file_descriptor);
+}
 
 void print_usage(char *prg)
 {
@@ -216,6 +270,8 @@ void print_usage(char *prg)
     fprintf(stderr, "         -e          (dump CAN error frames in human-readable format)\n");
     fprintf(stderr, "         -x          (print extra message infos, rx/tx brs esi)\n");
     fprintf(stderr, "         -T <msecs>  (terminate after <msecs> without any reception)\n");
+    fprintf(stderr, "         -u <device> (read input from UART 'device')\n");
+    fprintf(stderr, "         -b <speed>  (set UART 'device' to BAUD rate 'speed'; default is B115200)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Up to %d CAN interfaces with optional filter sets can be specified\n", MAXSOCK);
     fprintf(stderr, "on the commandline in the form: <ifname>[,filter]*\n");
@@ -250,7 +306,7 @@ int idx2dindex(int ifidx, int socket)
     int i;
     struct ifreq ifr;
 
-    for (i=0; i < MAXIFNAMES; i++)
+    for (i = 0; i < MAXIFNAMES; i++)
     {
         if (dindex[i] == ifidx)
             return i;
@@ -259,7 +315,7 @@ int idx2dindex(int ifidx, int socket)
     /* create new interface index cache entry */
 
     /* remove index cache zombies first */
-    for (i=0; i < MAXIFNAMES; i++)
+    for (i = 0; i < MAXIFNAMES; i++)
     {
         if (dindex[i])
         {
@@ -269,7 +325,7 @@ int idx2dindex(int ifidx, int socket)
         }
     }
 
-    for (i=0; i < MAXIFNAMES; i++)
+    for (i = 0; i < MAXIFNAMES; i++)
         if (!dindex[i]) /* free entry */
             break;
 
@@ -299,41 +355,41 @@ int idx2dindex(int ifidx, int socket)
 }
 
 int openLog()
+{
+    time_t currtime;
+    struct tm now;
+    char fname[83]; /* suggested by -Wformat-overflow= */
+    int retCode = 0;
+
+    if (time(&currtime) == (time_t)-1)
     {
-        time_t currtime;
-        struct tm now;
-        char fname[83]; /* suggested by -Wformat-overflow= */
-        int retCode = 0;
-
-        if (time(&currtime) == (time_t)-1)
-        {
-            perror("time");
-            return 1;
-        }
-
-        localtime_r(&currtime, &now);
-
-        sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
-                now.tm_year + 1900,
-                now.tm_mon + 1,
-                now.tm_mday,
-                now.tm_hour,
-                now.tm_min,
-                now.tm_sec);
-
-        if (silent != SILENT_ON)
-            fprintf(stderr, "Warning: Console output active while logging!\n");
-
-        fprintf(stderr, "Enabling Logfile '%s'\n", fname);
-
-        logfile = fopen(fname, "w");
-        if (!logfile)
-        {
-            perror("logfile");
-            retCode = 1;
-        }
-        return retCode;
+        perror("time");
+        return 1;
     }
+
+    localtime_r(&currtime, &now);
+
+    sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
+            now.tm_year + 1900,
+            now.tm_mon + 1,
+            now.tm_mday,
+            now.tm_hour,
+            now.tm_min,
+            now.tm_sec);
+
+    if (silent != SILENT_ON)
+        fprintf(stderr, "Warning: Console output active while logging!\n");
+
+    fprintf(stderr, "Enabling Logfile '%s'\n", fname);
+
+    logfile = fopen(fname, "w");
+    if (!logfile)
+    {
+        perror("logfile");
+        retCode = 1;
+    }
+    return retCode;
+}
 
 int main(int argc, char **argv)
 {
@@ -344,7 +400,6 @@ int main(int argc, char **argv)
     unsigned char down_causes_exit = 1;
     unsigned char dropmonitor = 0;
     unsigned char extra_msg_info = 0;
-    unsigned char silent = SILENT_INI;
     unsigned char silentani = 0;
     unsigned char color = 0;
     unsigned char view = 0;
@@ -358,7 +413,7 @@ int main(int argc, char **argv)
     int join_filter;
     char *ptr, *nptr;
     struct sockaddr_can addr;
-    char ctrlmsg[CMSG_SPACE(sizeof(struct timeval) + 3*sizeof(struct timespec) + sizeof(__u32))];
+    char ctrlmsg[CMSG_SPACE(sizeof(struct timeval) + 3 * sizeof(struct timespec) + sizeof(__u32))];
     struct iovec iov;
     struct msghdr msg;
     struct cmsghdr *cmsg;
@@ -368,24 +423,51 @@ int main(int argc, char **argv)
     int nbytes, i, maxdlen;
     struct ifreq ifr;
     struct timeval tv, last_tv;
-    struct timeval timeout, timeout_config = { 0, 0 }, *timeout_current = NULL;
-    FILE *logfile = NULL;
+    struct timeval timeout, timeout_config = {0, 0}, *timeout_current = NULL;
 
     signal(SIGTERM, sigterm);
     signal(SIGHUP, sigterm);
     signal(SIGINT, sigterm);
 
-    last_tv.tv_sec  = 0;
+    last_tv.tv_sec = 0;
     last_tv.tv_usec = 0;
 
-    while ((opt = getopt(argc, argv, "t:HciaSs:lDdxLn:r:heT:?")) != -1)
+    while ((opt = getopt(argc, argv, "t:HciaSs:lDdxLn:r:heT:u:b:?")) != -1)
     {
         switch (opt)
         {
+        case 'u':
+            strncpy(uart_name, optarg, MAX_DEVICE_NAME - 1);
+            break;
+
+        case 'b':
+            i = atoi(optarg);
+            if (9600 == i)
+            {
+                uart_speed = B9600;
+            }
+            else if (19200 == i)
+            {
+                uart_speed = B19200;
+            }
+            else if (38400 == i)
+            {
+                uart_speed = B38400;
+            }
+            else if (57600 == i)
+            {
+                uart_speed = B57600;
+            }
+            else if (115200 == i)
+            {
+                uart_speed = B115200;
+            }
+            break;
+
         case 't':
             timestamp = optarg[0];
             if ((timestamp != 'a') && (timestamp != 'A') &&
-                    (timestamp != 'd') && (timestamp != 'z'))
+                (timestamp != 'd') && (timestamp != 'z'))
             {
                 fprintf(stderr, "%s: unknown timestamp mode '%c' - ignored\n",
                         basename(argv[0]), optarg[0]);
@@ -519,10 +601,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    for (i=0; i < currmax; i++)
+    for (i = 0; i < currmax; i++)
     {
 
-        ptr = argv[optind+i];
+        ptr = argv[optind + i];
         nptr = strchr(ptr, ',');
 
 #ifdef DEBUG
@@ -539,7 +621,7 @@ int main(int argc, char **argv)
         cmdlinename[i] = ptr; /* save pointer to cmdline name of this socket */
 
         if (nptr)
-            nbytes = nptr - ptr;  /* interface name is up the first ',' */
+            nbytes = nptr - ptr; /* interface name is up the first ',' */
         else
             nbytes = strlen(ptr); /* no ',' found => no filter definitions */
 
@@ -584,7 +666,7 @@ int main(int argc, char **argv)
             while (ptr)
             {
                 numfilter++;
-                ptr++; /* hop behind the ',' */
+                ptr++;                  /* hop behind the ',' */
                 ptr = strchr(ptr, ','); /* exit condition */
             }
 
@@ -602,7 +684,7 @@ int main(int argc, char **argv)
             while (nptr)
             {
 
-                ptr = nptr+1; /* hop behind the ',' */
+                ptr = nptr + 1;          /* hop behind the ',' */
                 nptr = strchr(ptr, ','); /* update exit condition */
 
                 if (sscanf(ptr, "%x:%x",
@@ -610,7 +692,7 @@ int main(int argc, char **argv)
                            &rfilter[numfilter].can_mask) == 2)
                 {
                     rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
-                    if (*(ptr+8) == ':')
+                    if (*(ptr + 8) == ':')
                         rfilter[numfilter].can_id |= CAN_EFF_FLAG;
                     numfilter++;
                 }
@@ -620,7 +702,7 @@ int main(int argc, char **argv)
                 {
                     rfilter[numfilter].can_id |= CAN_INV_FILTER;
                     rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
-                    if (*(ptr+8) == '~')
+                    if (*(ptr + 8) == '~')
                         rfilter[numfilter].can_id |= CAN_EFF_FLAG;
                     numfilter++;
                 }
@@ -686,9 +768,9 @@ int main(int argc, char **argv)
 
                 /* Only print a warning the first time we detect the adjustment */
                 /* n.b.: The wanted size is doubled in Linux in net/sore/sock.c */
-                if (!i && curr_rcvbuf_size < rcvbuf_size*2)
+                if (!i && curr_rcvbuf_size < rcvbuf_size * 2)
                     fprintf(stderr, "The socket receive buffer size was "
-                            "adjusted due to /proc/sys/net/core/rmem_max.\n");
+                                    "adjusted due to /proc/sys/net/core/rmem_max.\n");
             }
         }
 
@@ -697,8 +779,8 @@ int main(int argc, char **argv)
 
             if (hwtimestamp)
             {
-                const int timestamping_flags = (SOF_TIMESTAMPING_SOFTWARE | \
-                                                SOF_TIMESTAMPING_RX_SOFTWARE | \
+                const int timestamping_flags = (SOF_TIMESTAMPING_SOFTWARE |
+                                                SOF_TIMESTAMPING_RX_SOFTWARE |
                                                 SOF_TIMESTAMPING_RAW_HARDWARE);
 
                 if (setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMPING,
@@ -741,7 +823,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (log)  // Changed to function call for 
+    if (log) // Changed to function call for
     {
         int logOpened;
         logOpened = openLog();
@@ -750,6 +832,11 @@ int main(int argc, char **argv)
             perror("logfile");
             return 1;
         }
+    }
+
+    if (0 == strcmp("\0", uart_name)) // Open a UART if needed
+    {
+        uart_fd = open_uart(uart_name, uart_speed);
     }
 
     /* these settings are static and can be held out of the hot path */
@@ -763,20 +850,42 @@ int main(int argc, char **argv)
     {
 
         FD_ZERO(&rdfs);
-        for (i=0; i<currmax; i++)
+        for (i = 0; i < currmax; i++)
             FD_SET(s[i], &rdfs);
 
         if (timeout_current)
             *timeout_current = timeout_config;
 
-        if ((ret = select(s[currmax-1]+1, &rdfs, NULL, NULL, timeout_current)) <= 0)
+        if ((ret = select(s[currmax - 1] + 1, &rdfs, NULL, NULL, timeout_current)) <= 0)
         {
             //perror("select");
             running = 0;
             continue;
         }
 
-        for (i=0; i<currmax; i++)    /* check all CAN RAW sockets */
+        if (0 < uart_fd)
+        {
+            if (0 < read(uart_fd, uart_buffer, sizeof(uart_buffer)))
+            {
+                printf(uart_buffer);
+                if (log)
+                {
+                    i = 0;
+                    while (('\0' != uart_buffer[i]) && (i <  sizeof(uart_buffer)))
+                    {
+                        if(('\r' == uart_buffer[i]) || ('\n' == uart_buffer[i]))
+                        {
+                            uart_buffer[i] = ' ';
+                        }
+                    }
+                    clock_gettime(CLOCK_REALTIME, &uart_tv);
+                    fprintf(logfile, "(%010lu.%06lu) uart %s\n",
+                            uart_tv.tv_sec, uart_tv.tv_nsec / 1000, uart_buffer);
+                }
+            }
+        }
+
+        for (i = 0; i < currmax; i++) /* check all CAN RAW sockets */
         {
 
             if (FD_ISSET(s[i], &rdfs))
@@ -819,8 +928,8 @@ int main(int argc, char **argv)
                     running = 0;
 
                 for (cmsg = CMSG_FIRSTHDR(&msg);
-                        cmsg && (cmsg->cmsg_level == SOL_SOCKET);
-                        cmsg = CMSG_NXTHDR(&msg,cmsg))
+                     cmsg && (cmsg->cmsg_level == SOL_SOCKET);
+                     cmsg = CMSG_NXTHDR(&msg, cmsg))
                 {
                     if (cmsg->cmsg_type == SO_TIMESTAMP)
                     {
@@ -839,7 +948,7 @@ int main(int argc, char **argv)
                          * linux/Documentation/networking/timestamping.txt
                          */
                         tv.tv_sec = stamp[2].tv_sec;
-                        tv.tv_usec = stamp[2].tv_nsec/1000;
+                        tv.tv_usec = stamp[2].tv_nsec / 1000;
                     }
                     else if (cmsg->cmsg_type == SO_RXQ_OVFL)
                         memcpy(&dropcnt[i], CMSG_DATA(cmsg), sizeof(__u32));
@@ -853,11 +962,11 @@ int main(int argc, char **argv)
 
                     if (silent != SILENT_ON)
                         printf("DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total drops %d)\n",
-                               frames, (frames > 1)?"s":"", devname[idx], dropcnt[i]);
+                               frames, (frames > 1) ? "s" : "", devname[idx], dropcnt[i]);
 
                     if (log)
                         fprintf(logfile, "DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total drops %d)\n",
-                                frames, (frames > 1)?"s":"", devname[idx], dropcnt[i]);
+                                frames, (frames > 1) ? "s" : "", devname[idx], dropcnt[i]);
 
                     last_dropcnt[i] = dropcnt[i];
                 }
@@ -903,13 +1012,13 @@ int main(int argc, char **argv)
                 {
                     if (silent == SILENT_ANI)
                     {
-                        printf("%c\b", anichar[silentani%=MAXANI]);
+                        printf("%c\b", anichar[silentani %= MAXANI]);
                         silentani++;
                     }
                     goto out_fflush; /* no other output to stdout */
                 }
 
-                printf(" %s", (color>2)?col_on[idx%MAXCOL]:"");
+                printf(" %s", (color > 2) ? col_on[idx % MAXCOL] : "");
 
                 switch (timestamp)
                 {
@@ -934,9 +1043,9 @@ int main(int argc, char **argv)
                 {
                     struct timeval diff;
 
-                    if (last_tv.tv_sec == 0)   /* first init */
+                    if (last_tv.tv_sec == 0) /* first init */
                         last_tv = tv;
-                    diff.tv_sec  = tv.tv_sec  - last_tv.tv_sec;
+                    diff.tv_sec = tv.tv_sec - last_tv.tv_sec;
                     diff.tv_usec = tv.tv_usec - last_tv.tv_usec;
                     if (diff.tv_usec < 0)
                         diff.tv_sec--, diff.tv_usec += 1000000;
@@ -953,37 +1062,41 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                printf(" %s", (color && (color<3))?col_on[idx%MAXCOL]:"");
+                printf(" %s", (color && (color < 3)) ? col_on[idx % MAXCOL] : "");
                 printf("%*s", max_devname_len, devname[idx]);
 
                 if (extra_msg_info)
                 {
 
                     if (msg.msg_flags & MSG_DONTROUTE)
-                        printf ("  TX %s", extra_m_info[frame.flags & 3]);
+                        printf("  TX %s", extra_m_info[frame.flags & 3]);
                     else
-                        printf ("  RX %s", extra_m_info[frame.flags & 3]);
+                        printf("  RX %s", extra_m_info[frame.flags & 3]);
                 }
 
-                printf("%s  ", (color==1)?col_off:"");
+                printf("%s  ", (color == 1) ? col_off : "");
 
                 fprint_long_canframe(stdout, &frame, NULL, view, maxdlen);
 
-                printf("%s", (color>1)?col_off:"");
+                printf("%s", (color > 1) ? col_off : "");
                 printf("\n");
             }
 
-out_fflush:
+        out_fflush:
             fflush(stdout);
         }
     }
 
-    for (i=0; i<currmax; i++)
+    for (i = 0; i < currmax; i++)
         close(s[i]);
+
+    if (0 < uart_fd)
+    {
+        close(uart_fd);
+    }
 
     if (log)
         fclose(logfile);
 
     return 0;
 }
-

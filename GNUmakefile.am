@@ -51,6 +51,7 @@ bin_PROGRAMS = \
 	canplayer \
 	cansend \
 	cansniffer \
+	canwatch \
 	isotpdump \
 	isotpperf \
 	isotprecv \
