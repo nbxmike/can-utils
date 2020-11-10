@@ -216,7 +216,7 @@ int open_uart(char *device_name, speed_t baud)
     struct termios uart_options;
 
     file_descriptor = open(device_name, O_RDWR | O_NOCTTY | O_NDELAY);
-    if (file_descriptor == -1)
+    if (0 > file_descriptor)
     {
         snprintf(outstring, ERROR_LENGTH, "TTY open failed on '%s'", device_name);
         perror(outstring);
@@ -834,9 +834,13 @@ int main(int argc, char **argv)
         }
     }
 
-    if (0 == strcmp("\0", uart_name)) // Open a UART if needed
+    if (0 != strcmp("\0", uart_name)) // Open a UART if needed
     {
         uart_fd = open_uart(uart_name, uart_speed);
+        if (0 > uart_fd)
+        {
+            return 1;
+        }
     }
 
     /* these settings are static and can be held out of the hot path */
@@ -863,7 +867,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (0 < uart_fd)
+        if (0 <= uart_fd)
         {
             if (0 < read(uart_fd, uart_buffer, sizeof(uart_buffer)))
             {
