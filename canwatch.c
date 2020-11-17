@@ -121,6 +121,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
@@ -206,6 +207,7 @@ unsigned char silent = SILENT_INI;
 static char uart_name[MAX_DEVICE_NAME] = "\0";
 static char uart_buffer[255]; /* basic input buffer */
 static int uart_buffer_size;
+static bool non_blank;
 static speed_t uart_speed = B115200;
 static int uart_fd = 0;
 static struct timespec uart_tv;
@@ -876,17 +878,25 @@ int main(int argc, char **argv)
                 if (log)
                 {
                     i = 0;
+                    non_blank = false;
                     while (('\0' != uart_buffer[i]) && (i <  sizeof(uart_buffer)))
                     {
                         if(('\r' == uart_buffer[i]) || ('\n' == uart_buffer[i]))
                         {
                             uart_buffer[i] = ' ';
                         }
+                        else if ('\x20' < uart_buffer[i])
+                        {
+                            non_blank = true;
+                        }
                         ++i;
                     }
-                    clock_gettime(CLOCK_REALTIME, &uart_tv);
-                    fprintf(logfile, "(%010lu.%06lu) uart %s\n",
+                    if (non_blank)
+                    {
+                        clock_gettime(CLOCK_REALTIME, &uart_tv);
+                        fprintf(logfile, "(%010lu.%06lu) uart %s\n",
                             uart_tv.tv_sec, uart_tv.tv_nsec / 1000, uart_buffer);
+                    }
                 }
             }
         }
