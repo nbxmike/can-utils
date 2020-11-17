@@ -48,7 +48,8 @@ def main():
             print("Battery serial number programmed")
             # Clear out any critical error that pre-existed, first send a 600 with CRIT_RESET
             msg = can.Message(arbitration_id=0x18000000, data=[2, id2, id1, id0, 0, 0, 0, 0], is_extended_id=True)
-            # look for a 300 with status 0x80 
+            # look for a 300 with status 0x80
+            canbus.send(msg) 
             index = 0
             status_ok = False
             time_start = time.time() 
@@ -69,6 +70,7 @@ def main():
                 # Finally reset the battery to ensure that the error code byte is cleared
                 msg = can.Message(arbitration_id=0x10000000, data=[4, id2, id1, id0, 0, 0, 0, 0], is_extended_id=True)
                 # look for a 300 with status 0x80 and error code of zero, but since the BMS cycles through error code need to check for a while 
+                canbus.send(msg)
                 index = 0
                 redidual_error_ok = False
                 time_start = time.time() 
