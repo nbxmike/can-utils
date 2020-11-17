@@ -121,6 +121,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
@@ -205,6 +206,8 @@ unsigned char silent = SILENT_INI;
 #define MAX_DEVICE_NAME (83)
 static char uart_name[MAX_DEVICE_NAME] = "\0";
 static char uart_buffer[255]; /* basic input buffer */
+static int uart_buffer_size;
+static bool non_blank;
 static speed_t uart_speed = B115200;
 static int uart_fd = 0;
 static struct timespec uart_tv;
@@ -215,7 +218,7 @@ int open_uart(char *device_name, speed_t baud)
     char outstring[ERROR_LENGTH];
     struct termios uart_options;
 
-    file_descriptor = open(device_name, O_RDWR | O_NOCTTY | O_NDELAY);
+    file_descriptor = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (0 > file_descriptor)
     {
         snprintf(outstring, ERROR_LENGTH, "TTY open failed on '%s'", device_name);
@@ -223,7 +226,6 @@ int open_uart(char *device_name, speed_t baud)
     }
     else
     {
-        fcntl(file_descriptor, F_SETFL, FNDELAY);  // Non-blocking read
         tcgetattr(file_descriptor, &uart_options); // Set line options
         // Set the BAUD rate
         cfsetispeed(&uart_options, baud);
@@ -869,22 +871,32 @@ int main(int argc, char **argv)
 
         if (0 <= uart_fd)
         {
-            if (0 < read(uart_fd, uart_buffer, sizeof(uart_buffer)))
+            if (0 < (uart_buffer_size = read(uart_fd, uart_buffer, sizeof(uart_buffer))))
             {
+                uart_buffer[uart_buffer_size] = '\0';
                 printf(uart_buffer);
                 if (log)
                 {
                     i = 0;
+                    non_blank = false;
                     while (('\0' != uart_buffer[i]) && (i <  sizeof(uart_buffer)))
                     {
                         if(('\r' == uart_buffer[i]) || ('\n' == uart_buffer[i]))
                         {
                             uart_buffer[i] = ' ';
                         }
+                        else if ('\x20' < uart_buffer[i])
+                        {
+                            non_blank = true;
+                        }
+                        ++i;
                     }
-                    clock_gettime(CLOCK_REALTIME, &uart_tv);
-                    fprintf(logfile, "(%010lu.%06lu) uart %s\n",
+                    if (non_blank)
+                    {
+                        clock_gettime(CLOCK_REALTIME, &uart_tv);
+                        fprintf(logfile, "(%010lu.%06lu) uart %s\n",
                             uart_tv.tv_sec, uart_tv.tv_nsec / 1000, uart_buffer);
+                    }
                 }
             }
         }
