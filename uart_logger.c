@@ -83,6 +83,9 @@ static int max_devname_len; /* to prevent frazzled device name output */
 const int canfd_on = 1;
 
 #define MAXANI 4
+#define BUFFER_AVAILABLE (960)
+#define BUFFER_PREFIX (64)
+
 const char anichar[MAXANI] = { '|', '/', '-', '\\' };
 const char extra_m_info[4][4] = { "- -", "B -", "- E", "B E" };
 
@@ -95,15 +98,19 @@ unsigned char silent = SILENT_INI;
 // Changes to support UART logging
 #define MAX_DEVICE_NAME (83)
 static char uart_name[MAX_DEVICE_NAME] = "\0";
-static char uart_buffer[255]; /* basic input buffer */
+static char
+    uart_buffer[BUFFER_AVAILABLE + BUFFER_PREFIX]; /* basic input buffer */
+static char print_buffer[BUFFER_AVAILABLE + BUFFER_PREFIX];
 static int uart_buffer_size;
+static int print_buffer_size;
 static bool non_blank;
 static speed_t uart_speed = B115200;
 static int uart_fd = 0;
 static struct timespec uart_tv;
 static long rcvTimeout = 5000;
+static long idleTimems;
 static struct timespec now_tv;
-static int logOpened;
+static bool logOpened;
 
 int open_uart (char *device_name, speed_t baud)
 {
@@ -183,10 +190,10 @@ int openLog ()
     fprintf (stderr, "Enabling Logfile '%s'\n", fileName);
 
     logfile = fopen (fname, "w");
-    if (!logfile)
+    if (NULL == logfile)
     {
       perror ("logfile");
-      retCode = 1;
+      retCode = 2;
     }
   }
   return retCode;
@@ -222,7 +229,7 @@ int main (int argc, char **argv)
   struct can_filter *rfilter;
   can_err_mask_t err_mask;
   struct canfd_frame frame;
-  int nbytes, i, maxdlen;
+  int nbytes, index, maxdlen;
   struct ifreq ifr;
   struct timeval tv, last_tv;
   struct timeval timeout, timeout_config = { 0, 0 }, *timeout_current = NULL;
@@ -285,272 +292,80 @@ int main (int argc, char **argv)
     }
   }
 
-  logOpened = openLog ();
-  if (0 != logOpened)
-  {
-    perror ("logfile");
-    return 1;
-  }
-
   uart_fd = open_uart (uart_name, uart_speed);
   if (0 > uart_fd)
   {
+    perror("UART open failed");
     return 1;
   }
 
-  logOpened = 0;
+  logOpened = false;
 
   while (running)
   {
 
-    if (0 != logOpened)
-    {
-      clock_gettime (CLOCK_REALTIME, &now_tv);
-    }
-
-    if (timeout_current)
-      *timeout_current = timeout_config;
-
-    if ((ret = select (s[currmax - 1] + 1, &rdfs, NULL, NULL, timeout_current))
-        <= 0)
-    {
-      // perror("select");
-      running = 0;
-      continue;
-    }
-
-    if (0 <= uart_fd)
-    {
-      if (0 < (uart_buffer_size
-               = read (uart_fd, uart_buffer, sizeof (uart_buffer))))
+    if (0 < rcvTimeout) // We can be told to close a log file if the UART is
+    {                   // idle too long.  It will get opened when another line is recieved
+      if (logOpened)
       {
-        uart_buffer[uart_buffer_size] = '\0';
+        clock_gettime (CLOCK_REALTIME, &now_tv);
+        idleTimems = ((1000 * now_tv.tv_sec - uart_tv.tv_sec)
+                      + (now_tv.tv_nsec / 1000000))
+                      - (uart_tv.tv_nsec / 1000000);
+        if (idleTimems < rcvTimeout)
+        {
+          fclose (logfile);
+          logOpened = false;
+        }
+      }
+    }
+
+    uart_buffer_size = read (uart_fd, uart_buffer, BUFFER_AVAILABLE);
+    if (0 < uart_buffer_size)
+    {
+      if (false == logOpened) // Log file is opened when we get a message,mclosed when timed out
+      {                       //  so open a log if there isn't one at the moment
+        if (0 != openLog ())
+        {
+          logOpened = true;
+        }
+      }
+
+      uart_buffer[uart_buffer_size] = '\0';
+      if (false == logOpened)
+      {
+        strncpy (print_buffer, "UNLOGGED --  \0", BUFFER_PREFIX);
+        print_buffer_size = strlen (print_buffer);
+        strncpy (&print_buffer[print_buffer_size], uart_buffer,
+                 BUFFER_AVAILABLE);
+        print_buffer_size = strlen (print_buffer);
+        printf (print_buffer);
+      }
+      else
+      {
         printf (uart_buffer);
-        if (log)
+
+        index = 0;
+        non_blank = false;
+        while (('\0' != uart_buffer[index]) && (index < sizeof (uart_buffer)))
         {
-          i = 0;
-          non_blank = false;
-          while (('\0' != uart_buffer[i]) && (i < sizeof (uart_buffer)))
+          if (('\r' == uart_buffer[index]) || ('\n' == uart_buffer[index]))
           {
-            if (('\r' == uart_buffer[i]) || ('\n' == uart_buffer[i]))
-            {
-              uart_buffer[i] = ' ';
-            }
-            else if ('\x20' < uart_buffer[i])
-            {
-              non_blank = true;
-            }
-            ++i;
+            uart_buffer[index] = ' ';
           }
-          if (non_blank)
+          else if ('\x20' < uart_buffer[index])
           {
-            clock_gettime (CLOCK_REALTIME, &uart_tv);
-            fprintf (logfile, "(%010lu.%06lu) uart %s\n", uart_tv.tv_sec,
-                     uart_tv.tv_nsec / 1000, uart_buffer);
+            non_blank = true;
           }
+          ++index;
+        }
+        if (non_blank)
+        {
+          clock_gettime (CLOCK_REALTIME, &uart_tv);
+          fprintf (logfile, "(%010lu.%06lu) uart %s\n", uart_tv.tv_sec,
+                   uart_tv.tv_nsec / 1000, uart_buffer);
         }
       }
-    }
-
-    for (i = 0; i < currmax; i++) /* check all CAN RAW sockets */
-    {
-
-      if (FD_ISSET (s[i], &rdfs))
-      {
-
-        int idx;
-        char *extra_info = "";
-
-        /* these settings may be modified by recvmsg() */
-        iov.iov_len = sizeof (frame);
-        msg.msg_namelen = sizeof (addr);
-        msg.msg_controllen = sizeof (ctrlmsg);
-        msg.msg_flags = 0;
-
-        nbytes = recvmsg (s[i], &msg, 0);
-        idx = idx2dindex (addr.can_ifindex, s[i]);
-
-        if (nbytes < 0)
-        {
-          if ((errno == ENETDOWN) && !down_causes_exit)
-          {
-            fprintf (stderr, "%s: interface down\n", devname[idx]);
-            continue;
-          }
-          perror ("read");
-          return 1;
-        }
-
-        if ((size_t)nbytes == CAN_MTU)
-          maxdlen = CAN_MAX_DLEN;
-        else if ((size_t)nbytes == CANFD_MTU)
-          maxdlen = CANFD_MAX_DLEN;
-        else
-        {
-          fprintf (stderr, "read: incomplete CAN frame\n");
-          return 1;
-        }
-
-        if (count && (--count == 0))
-          running = 0;
-
-        for (cmsg = CMSG_FIRSTHDR (&msg);
-             cmsg && (cmsg->cmsg_level == SOL_SOCKET);
-             cmsg = CMSG_NXTHDR (&msg, cmsg))
-        {
-          if (cmsg->cmsg_type == SO_TIMESTAMP)
-          {
-            memcpy (&tv, CMSG_DATA (cmsg), sizeof (tv));
-          }
-          else if (cmsg->cmsg_type == SO_TIMESTAMPING)
-          {
-
-            struct timespec *stamp = (struct timespec *)CMSG_DATA (cmsg);
-
-            /*
-             * stamp[0] is the software timestamp
-             * stamp[1] is deprecated
-             * stamp[2] is the raw hardware timestamp
-             * See chapter 2.1.2 Receive timestamps in
-             * linux/Documentation/networking/timestamping.txt
-             */
-            tv.tv_sec = stamp[2].tv_sec;
-            tv.tv_usec = stamp[2].tv_nsec / 1000;
-          }
-          else if (cmsg->cmsg_type == SO_RXQ_OVFL)
-            memcpy (&dropcnt[i], CMSG_DATA (cmsg), sizeof (__u32));
-        }
-
-        /* check for (unlikely) dropped frames on this specific socket */
-        if (dropcnt[i] != last_dropcnt[i])
-        {
-
-          __u32 frames = dropcnt[i] - last_dropcnt[i];
-
-          if (silent != SILENT_ON)
-            printf ("DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total "
-                    "drops %d)\n",
-                    frames, (frames > 1) ? "s" : "", devname[idx], dropcnt[i]);
-
-          if (log)
-            fprintf (logfile,
-                     "DROPCOUNT: dropped %d CAN frame%s on '%s' socket (total "
-                     "drops %d)\n",
-                     frames, (frames > 1) ? "s" : "", devname[idx],
-                     dropcnt[i]);
-
-          last_dropcnt[i] = dropcnt[i];
-        }
-
-        /* once we detected a EFF frame indent SFF frames accordingly */
-        if (frame.can_id & CAN_EFF_FLAG)
-          view |= CANLIB_VIEW_INDENT_SFF;
-
-        if (extra_msg_info)
-        {
-          if (msg.msg_flags & MSG_DONTROUTE)
-            extra_info = " T";
-          else
-            extra_info = " R";
-        }
-
-        if (log)
-        {
-          char buf[CL_CFSZ]; /* max length */
-
-          /* log CAN frame with absolute timestamp & device */
-          sprint_canframe (buf, &frame, 0, maxdlen);
-          fprintf (logfile, "(%010lu.%06lu) %*s %s%s\n", tv.tv_sec, tv.tv_usec,
-                   max_devname_len, devname[idx], buf, extra_info);
-        }
-
-        if ((logfrmt) && (silent == SILENT_OFF))
-        {
-          char buf[CL_CFSZ]; /* max length */
-
-          /* print CAN frame in log file style to stdout */
-          sprint_canframe (buf, &frame, 0, maxdlen);
-          printf ("(%010lu.%06lu) %*s %s%s\n", tv.tv_sec, tv.tv_usec,
-                  max_devname_len, devname[idx], buf, extra_info);
-          goto out_fflush; /* no other output to stdout */
-        }
-
-        if (silent != SILENT_OFF)
-        {
-          if (silent == SILENT_ANI)
-          {
-            printf ("%c\b", anichar[silentani %= MAXANI]);
-            silentani++;
-          }
-          goto out_fflush; /* no other output to stdout */
-        }
-
-        printf (" %s", (color > 2) ? col_on[idx % MAXCOL] : "");
-
-        switch (timestamp)
-        {
-
-        case 'a': /* absolute with timestamp */
-          printf ("(%010lu.%06lu) ", tv.tv_sec, tv.tv_usec);
-          break;
-
-        case 'A': /* absolute with date */
-        {
-          struct tm tm;
-          char timestring[25];
-
-          tm = *localtime (&tv.tv_sec);
-          strftime (timestring, 24, "%Y-%m-%d %H:%M:%S", &tm);
-          printf ("(%s.%06lu) ", timestring, tv.tv_usec);
-        }
-        break;
-
-        case 'd': /* delta */
-        case 'z': /* starting with zero */
-        {
-          struct timeval diff;
-
-          if (last_tv.tv_sec == 0) /* first init */
-            last_tv = tv;
-          diff.tv_sec = tv.tv_sec - last_tv.tv_sec;
-          diff.tv_usec = tv.tv_usec - last_tv.tv_usec;
-          if (diff.tv_usec < 0)
-            diff.tv_sec--, diff.tv_usec += 1000000;
-          if (diff.tv_sec < 0)
-            diff.tv_sec = diff.tv_usec = 0;
-          printf ("(%03lu.%06lu) ", diff.tv_sec, diff.tv_usec);
-
-          if (timestamp == 'd')
-            last_tv = tv; /* update for delta calculation */
-        }
-        break;
-
-        default: /* no timestamp output */
-          break;
-        }
-
-        printf (" %s", (color && (color < 3)) ? col_on[idx % MAXCOL] : "");
-        printf ("%*s", max_devname_len, devname[idx]);
-
-        if (extra_msg_info)
-        {
-
-          if (msg.msg_flags & MSG_DONTROUTE)
-            printf ("  TX %s", extra_m_info[frame.flags & 3]);
-          else
-            printf ("  RX %s", extra_m_info[frame.flags & 3]);
-        }
-
-        printf ("%s  ", (color == 1) ? col_off : "");
-
-        fprint_long_canframe (stdout, &frame, NULL, view, maxdlen);
-
-        printf ("%s", (color > 1) ? col_off : "");
-        printf ("\n");
-      }
-
-    out_fflush:
-      fflush (stdout);
     }
   }
 
