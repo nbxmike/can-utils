@@ -101,7 +101,9 @@ static bool non_blank;
 static speed_t uart_speed = B115200;
 static int uart_fd = 0;
 static struct timespec uart_tv;
-static long rcvTimeout =5000;
+static long rcvTimeout = 5000;
+static struct timespec now_tv;
+static int logOpened;
 
 int open_uart (char *device_name, speed_t baud)
 {
@@ -174,8 +176,9 @@ int openLog ()
     localtime_r (&epochTime, &calendarTime);
 
     sprintf (fileName, "UARTLog-%04d-%02d-%02d_%02d%02d%02d.log",
-             calendarTime.tm_year + 1900, calendarTime.tm_mon + 1, calendarTime.tm_mday, calendarTime.tm_hour,
-             calendarTime.tm_min, calendarTime.tm_sec);
+             calendarTime.tm_year + 1900, calendarTime.tm_mon + 1,
+             calendarTime.tm_mday, calendarTime.tm_hour, calendarTime.tm_min,
+             calendarTime.tm_sec);
 
     fprintf (stderr, "Enabling Logfile '%s'\n", fileName);
 
@@ -224,10 +227,10 @@ int main (int argc, char **argv)
   struct timeval tv, last_tv;
   struct timeval timeout, timeout_config = { 0, 0 }, *timeout_current = NULL;
 
-  strncpy(uart_name, "/dev/ttyUSB0",MAX_DEVICE_NAME-1);  // Set default UART
+  strncpy (uart_name, "/dev/ttyUSB0", MAX_DEVICE_NAME - 1); // Set default UART
 
-  signal (SIGTERM, sigterm);  // Terminate cleanly on <ctrl-C> 
-  signal (SIGHUP, sigterm);   //  or other causes.
+  signal (SIGTERM, sigterm); // Terminate cleanly on <ctrl-C>
+  signal (SIGHUP, sigterm);  //  or other causes.
   signal (SIGINT, sigterm);
 
   last_tv.tv_sec = 0;
@@ -282,26 +285,28 @@ int main (int argc, char **argv)
     }
   }
 
-    int logOpened;
-    logOpened = openLog ();
-    if (0 != logOpened)
-    {
-      perror ("logfile");
-      return 1;
-    }
+  logOpened = openLog ();
+  if (0 != logOpened)
+  {
+    perror ("logfile");
+    return 1;
+  }
 
-    uart_fd = open_uart (uart_name, uart_speed);
-    if (0 > uart_fd)
-    {
-      return 1;
-    }
+  uart_fd = open_uart (uart_name, uart_speed);
+  if (0 > uart_fd)
+  {
+    return 1;
+  }
+
+  logOpened = 0;
 
   while (running)
   {
 
-    FD_ZERO (&rdfs);
-    for (i = 0; i < currmax; i++)
-      FD_SET (s[i], &rdfs);
+    if (0 != logOpened)
+    {
+      clock_gettime (CLOCK_REALTIME, &now_tv);
+    }
 
     if (timeout_current)
       *timeout_current = timeout_config;
