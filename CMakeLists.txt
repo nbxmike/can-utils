@@ -36,6 +36,7 @@ set(PROGRAMS_CANLIB
     canwatch
     log2asc
     log2long
+    uart_logger
 )
 
 set(PROGRAMS_J1939

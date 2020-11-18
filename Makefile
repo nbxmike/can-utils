@@ -95,7 +95,8 @@ PROGRAMS := \
 	cansniffer \
 	log2asc \
 	log2long \
-	slcanpty
+	slcanpty \
+	uart_logger
 
 all: $(PROGRAMS)
 
@@ -124,6 +125,7 @@ j1939spy.o:		libj1939.h
 j1939sr.o:		libj1939.h
 testj1939.o:	libj1939.h
 canframelen.o:  canframelen.h
+uart_logger.o:	lib.h
 
 asc2log:	asc2log.o	lib.o
 candump:	candump.o	lib.o
@@ -139,3 +141,4 @@ j1939spy:		j1939spy.o		libj1939.o
 j1939sr:		j1939sr.o		libj1939.o
 testj1939:	testj1939.o	libj1939.o
 canbusload:	canbusload.o	canframelen.o
+uart_logger:	uart_logger.o	lib.o

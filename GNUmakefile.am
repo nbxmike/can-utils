@@ -68,7 +68,8 @@ bin_PROGRAMS = \
 	slcan_attach \
 	slcand \
 	slcanpty \
-	testj1939
+	testj1939 \
+	uart_logger
 
 j1939acd_LDADD = libj1939.la
 j1939cat_LDADD = libj1939.la
