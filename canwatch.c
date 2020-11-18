@@ -371,7 +371,7 @@ int openLog()
 
     localtime_r(&currtime, &now);
 
-    sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
+    sprintf(fname, "canwatch-%04d-%02d-%02d_%02d%02d%02d.log",
             now.tm_year + 1900,
             now.tm_mon + 1,
             now.tm_mday,
